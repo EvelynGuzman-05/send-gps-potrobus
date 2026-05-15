@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.location.Location
 import android.os.Build
@@ -22,13 +23,14 @@ class GpsService : Service() {
 
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var locationCallback: LocationCallback
+    private lateinit var prefs: SharedPreferences
     private val client = OkHttpClient()
-    private val JSON = "application/json; charset=utf-8".toMediaType()
-
-    private val API_URL = "<Aquí ponen la ip que les da la app.py>/api/gps/position"
+    private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
+    private val BASE_URL = "http://192.168.68.56:5500"
 
     override fun onCreate() {
         super.onCreate()
+        prefs = getSharedPreferences("potrobus_prefs", MODE_PRIVATE)
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
 
         locationCallback = object : LocationCallback() {
@@ -58,9 +60,10 @@ class GpsService : Service() {
             manager.createNotificationChannel(channel)
         }
 
+        val numEco = prefs.getString("numero_economico", "—")
         val notification: Notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("GPS Tracking")
-            .setContentText("Enviando ubicación al servidor...")
+            .setContentTitle("PotroBus — Tracking activo")
+            .setContentText("Unidad $numEco enviando ubicación...")
             .setSmallIcon(R.mipmap.ic_launcher)
             .build()
 
@@ -82,37 +85,45 @@ class GpsService : Service() {
                 locationCallback,
                 Looper.getMainLooper()
             )
-        } catch (unlikely: SecurityException) {
-            Log.e("GpsService", "No se tiene permiso de ubicación. $unlikely")
+        } catch (e: SecurityException) {
+            Log.e("GpsService", "Sin permiso de ubicación: ${e.message}")
         }
     }
 
     private fun sendLocationToApi(location: Location) {
-        val json = """
-        {
-            "id_recorrido": 2, 
-            "lat": ${location.latitude},
-            "lng": ${location.longitude},
-            "timestamp": ${System.currentTimeMillis()}
-        }
-    """.trimIndent()
+        val idUnidad = prefs.getInt("id_unidad", -1)
 
-        val body = json.toRequestBody(JSON)
+        if (idUnidad == -1) {
+            Log.e("GpsService", "No hay id_unidad en sesión — detener servicio")
+            stopSelf()
+            return
+        }
+
+        val json = """
+            {
+                "id_unidad": $idUnidad,
+                "lat": ${location.latitude},
+                "lng": ${location.longitude},
+                "timestamp": "${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())}"
+            }
+        """.trimIndent()
+
         val request = Request.Builder()
-            .url("<aquí ponen la IP que les da el app.py)/api/gps/position")
-            .post(body)
+            .url("$BASE_URL/api/gps/position")
+            .post(json.toRequestBody(JSON_MEDIA))
             .build()
 
         client.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                Log.e("GpsService", "Ocurrió un error al enviar la ubicación: ${e.message}")
+                Log.e("GpsService", "Error al enviar ubicación: ${e.message}")
             }
 
             override fun onResponse(call: Call, response: Response) {
                 if (response.isSuccessful) {
-                    Log.d("GpsService", "Se enviaron los datos al servidor")
+                    Log.d("GpsService", "GPS enviado — unidad $idUnidad " +
+                            "${location.latitude}, ${location.longitude}")
                 } else {
-                    Log.e("GpsService", "Error al enviar los datos al servidor: ${response.code}")
+                    Log.e("GpsService", "Error del servidor: ${response.code}")
                 }
                 response.close()
             }
